@@ -13,6 +13,9 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that 
 | `get_all_checkins` | Retrieve your entire check-in history |
 | `get_checkin_stats` | Get statistics (total count, date range, averages) |
 | `search_checkins` | Search check-ins by venue name or category |
+| `get_server_info` | Get server metadata, data sources, and tool costs |
+
+All responses include a `_meta` block with transparency info (completeness, API calls made, data scope) to help AI models make informed decisions about expensive operations.
 
 ## Installation
 
