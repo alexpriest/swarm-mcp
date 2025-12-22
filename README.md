@@ -17,6 +17,38 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that 
 
 All responses include a `_meta` block with transparency info (completeness, API calls made, data scope) to help AI models make informed decisions about expensive operations.
 
+### Tool Costs
+
+| Tool | Cost | Notes |
+|------|------|-------|
+| `get_checkins` | Low | Single paginated request |
+| `get_checkins_by_date_range` | Low | Single request with date filters |
+| `get_recent_checkins` | Low | Single request with time filter |
+| `get_checkin_details` | Low | Single check-in lookup |
+| `get_checkin_stats` | Low | 2 API calls (newest + oldest) |
+| `get_server_info` | None | Local introspection only |
+| `get_all_checkins` | **High** | 1 API call per 250 check-ins |
+| `search_checkins` | **High** | Client-side filtering; scans up to 5000 items |
+
+### Example `_meta` Response
+
+Every tool response includes metadata like this:
+
+```json
+{
+  "_meta": {
+    "is_complete": true,
+    "returned_count": 50,
+    "total_available": 1847,
+    "limit_applied": 50,
+    "api_calls_made": 1,
+    "data_source": "foursquare_swarm_api",
+    "data_scope": "authenticated_user_checkins"
+  },
+  "checkins": [...]
+}
+```
+
 ## Installation
 
 ### Using uvx (recommended)
@@ -41,6 +73,8 @@ You'll need a Foursquare OAuth2 access token:
 2. Create a new app (or use an existing one)
 3. Note your **Client ID** and **Client Secret**
 4. Generate an access token using the OAuth2 flow, or use the [API Explorer](https://docs.foursquare.com/developer/reference/v2-users-self) to get a token quickly
+
+> **Security:** Treat `FOURSQUARE_TOKEN` like a password—don't commit it, paste it in issues, or share screenshots with it visible.
 
 ### 2. Configure Your MCP Client
 
