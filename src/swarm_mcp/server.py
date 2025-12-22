@@ -8,7 +8,6 @@ Get your token from: https://foursquare.com/developers/apps
 
 import os
 import asyncio
-import json
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -22,6 +21,34 @@ API_BASE = "https://api.foursquare.com/v2"
 API_VERSION = "20231010"  # Foursquare requires a version date
 
 server = Server("swarm-mcp")
+
+
+def build_meta(
+    *,
+    is_complete: bool,
+    returned_count: int,
+    total_available: int | None = None,
+    limit_applied: int | None = None,
+    truncated_reason: str | None = None,
+    api_calls_made: int = 1,
+    items_scanned: int | None = None,
+) -> dict:
+    """Build a standardized _meta object for response transparency."""
+    meta = {
+        "is_complete": is_complete,
+        "returned_count": returned_count,
+        "total_available": total_available,
+        "api_calls_made": api_calls_made,
+        "data_source": "foursquare_swarm_api",
+        "data_scope": "authenticated_user_checkins",
+    }
+    if limit_applied is not None:
+        meta["limit_applied"] = limit_applied
+    if truncated_reason:
+        meta["truncated_reason"] = truncated_reason
+    if items_scanned is not None:
+        meta["items_scanned"] = items_scanned
+    return meta
 
 
 def get_token() -> str:
@@ -139,7 +166,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_all_checkins",
-            description="Get ALL check-ins by paginating through the entire history. Use with caution - may take time for users with many check-ins.",
+            description="Get ALL check-ins by paginating through the entire history. EXPENSIVE: Makes 1 API call per 250 check-ins (e.g., 5000 check-ins = 20 API calls). Prefer get_checkins with manual pagination for incremental access.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -161,13 +188,13 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="search_checkins",
-            description="Search check-ins by venue name or category.",
+            description="Search check-ins by venue name or category. EXPENSIVE: Requires client-side filtering (Foursquare API doesn't support venue search). Scans check-ins sequentially until limit matches found or 5000 items scanned. Use get_checkin_stats first to understand data volume.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search term to match against venue names"
+                        "description": "Search term to match against venue names or categories (case-insensitive substring match)"
                     },
                     "limit": {
                         "type": "integer",
@@ -176,6 +203,14 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["query"]
+            }
+        ),
+        Tool(
+            name="get_server_info",
+            description="Get information about this MCP server: data sources, privacy scope, available tools, and their costs. Cheap introspection call with no external API requests.",
+            inputSchema={
+                "type": "object",
+                "properties": {}
             }
         )
     ]
@@ -234,7 +269,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             total = checkins.get("count", 0)
             items = [format_checkin(c) for c in checkins.get("items", [])]
 
+            remaining = total - offset - len(items)
             result = {
+                "_meta": build_meta(
+                    is_complete=(remaining <= 0),
+                    returned_count=len(items),
+                    total_available=total,
+                    limit_applied=limit,
+                    truncated_reason="limit_reached" if remaining > 0 else None,
+                ),
                 "total_checkins": total,
                 "returned": len(items),
                 "offset": offset,
@@ -260,7 +303,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             checkins = data.get("response", {}).get("checkins", {})
             items = [format_checkin(c) for c in checkins.get("items", [])]
 
+            # If we got exactly `limit` items, there may be more
+            possibly_truncated = len(items) >= limit
             result = {
+                "_meta": build_meta(
+                    is_complete=not possibly_truncated,
+                    returned_count=len(items),
+                    total_available=None,  # Unknown for date-filtered queries
+                    limit_applied=limit,
+                    truncated_reason="limit_reached" if possibly_truncated else None,
+                ),
                 "date_range": f"{arguments['start_date']} to {arguments['end_date']}",
                 "count": len(items),
                 "checkins": items
@@ -281,7 +333,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             checkins = data.get("response", {}).get("checkins", {})
             items = [format_checkin(c) for c in checkins.get("items", [])]
 
+            possibly_truncated = len(items) >= limit
             result = {
+                "_meta": build_meta(
+                    is_complete=not possibly_truncated,
+                    returned_count=len(items),
+                    total_available=None,
+                    limit_applied=limit,
+                    truncated_reason="limit_reached" if possibly_truncated else None,
+                ),
                 "period": f"Last {days} days",
                 "count": len(items),
                 "checkins": items
@@ -293,12 +353,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             data = await make_request(f"/checkins/{checkin_id}")
             checkin = data.get("response", {}).get("checkin", {})
 
-            result = format_checkin(checkin)
+            formatted = format_checkin(checkin)
 
             # Add photos if available
             photos = checkin.get("photos", {}).get("items", [])
             if photos:
-                result["photos"] = [
+                formatted["photos"] = [
                     {
                         "url": f"{p.get('prefix')}original{p.get('suffix')}",
                         "width": p.get("width"),
@@ -307,11 +367,22 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     for p in photos
                 ]
 
+            result = {
+                "_meta": build_meta(
+                    is_complete=True,
+                    returned_count=1,
+                ),
+                "checkin": formatted
+            }
+
         elif name == "get_all_checkins":
             max_checkins = arguments.get("max_checkins", 1000)
             all_checkins = []
             offset = 0
             batch_size = 250
+            api_calls = 0
+            total_available = None
+            hit_max_limit = False
 
             while True:
                 data = await make_request("/users/self/checkins", {
@@ -319,8 +390,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     "offset": offset,
                     "sort": "newestfirst"
                 })
+                api_calls += 1
 
                 checkins = data.get("response", {}).get("checkins", {})
+                if total_available is None:
+                    total_available = checkins.get("count", 0)
                 items = checkins.get("items", [])
 
                 if not items:
@@ -331,12 +405,22 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
                 if max_checkins > 0 and len(all_checkins) >= max_checkins:
                     all_checkins = all_checkins[:max_checkins]
+                    hit_max_limit = True
                     break
 
                 if len(items) < batch_size:
                     break
 
+            is_complete = not hit_max_limit and len(all_checkins) >= (total_available or 0)
             result = {
+                "_meta": build_meta(
+                    is_complete=is_complete,
+                    returned_count=len(all_checkins),
+                    total_available=total_available,
+                    limit_applied=max_checkins if max_checkins > 0 else None,
+                    truncated_reason="max_checkins_reached" if hit_max_limit else None,
+                    api_calls_made=api_calls,
+                ),
                 "total_retrieved": len(all_checkins),
                 "checkins": all_checkins
             }
@@ -358,7 +442,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             })
             oldest = oldest_data.get("response", {}).get("checkins", {}).get("items", [])
 
-            result = {
+            stats = {
                 "total_checkins": total,
                 "newest_checkin": format_checkin(newest[0]) if newest else None,
                 "oldest_checkin": format_checkin(oldest[0]) if oldest else None,
@@ -368,8 +452,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 newest_dt = datetime.fromtimestamp(newest[0].get("createdAt", 0))
                 oldest_dt = datetime.fromtimestamp(oldest[0].get("createdAt", 0))
                 days_active = (newest_dt - oldest_dt).days
-                result["days_active"] = days_active
-                result["avg_checkins_per_day"] = round(total / max(days_active, 1), 2)
+                stats["days_active"] = days_active
+                stats["avg_checkins_per_day"] = round(total / max(days_active, 1), 2)
+
+            result = {
+                "_meta": build_meta(
+                    is_complete=True,
+                    returned_count=1,
+                    total_available=total,
+                    api_calls_made=2,
+                ),
+                **stats
+            }
 
         elif name == "search_checkins":
             query = arguments["query"].lower()
@@ -377,52 +471,116 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             # We need to fetch check-ins and filter locally
             # The API doesn't support venue name search on check-ins
-            all_checkins = []
+            matching_checkins = []
             offset = 0
             batch_size = 250
+            api_calls = 0
+            items_scanned = 0
+            total_available = None
+            hit_safety_limit = False
+            exhausted_all = False
 
-            while len(all_checkins) < limit:
+            while len(matching_checkins) < limit:
                 data = await make_request("/users/self/checkins", {
                     "limit": batch_size,
                     "offset": offset,
                     "sort": "newestfirst"
                 })
+                api_calls += 1
 
                 checkins = data.get("response", {}).get("checkins", {})
+                if total_available is None:
+                    total_available = checkins.get("count", 0)
                 items = checkins.get("items", [])
 
                 if not items:
+                    exhausted_all = True
                     break
 
                 for item in items:
+                    items_scanned += 1
                     venue = item.get("venue", {})
                     venue_name = venue.get("name", "").lower()
                     categories = venue.get("categories", [])
                     category_names = [c.get("name", "").lower() for c in categories]
 
                     if query in venue_name or any(query in cat for cat in category_names):
-                        all_checkins.append(format_checkin(item))
-                        if len(all_checkins) >= limit:
+                        matching_checkins.append(format_checkin(item))
+                        if len(matching_checkins) >= limit:
                             break
 
                 offset += len(items)
 
                 if len(items) < batch_size:
+                    exhausted_all = True
                     break
 
-                # Safety limit to avoid infinite loops
+                # Safety limit to avoid runaway searches
                 if offset > 5000:
+                    hit_safety_limit = True
                     break
+
+            # Determine completeness: complete if we exhausted all checkins OR found limit matches
+            is_complete = exhausted_all or len(matching_checkins) >= limit
+            truncated_reason = None
+            if hit_safety_limit:
+                truncated_reason = "safety_limit_5000_items"
+            elif len(matching_checkins) >= limit and not exhausted_all:
+                truncated_reason = "result_limit_reached"
 
             result = {
+                "_meta": build_meta(
+                    is_complete=is_complete and not hit_safety_limit,
+                    returned_count=len(matching_checkins),
+                    total_available=total_available,
+                    limit_applied=limit,
+                    truncated_reason=truncated_reason,
+                    api_calls_made=api_calls,
+                    items_scanned=items_scanned,
+                ),
                 "query": arguments["query"],
-                "count": len(all_checkins),
-                "checkins": all_checkins
+                "count": len(matching_checkins),
+                "checkins": matching_checkins
+            }
+
+        elif name == "get_server_info":
+            result = {
+                "_meta": build_meta(
+                    is_complete=True,
+                    returned_count=1,
+                    api_calls_made=0,
+                ),
+                "server": {
+                    "name": "swarm-mcp",
+                    "version": "0.1.0",
+                    "description": "MCP server for Foursquare Swarm check-in data",
+                },
+                "data_source": {
+                    "api": "Foursquare API v2",
+                    "base_url": "https://api.foursquare.com/v2",
+                    "authentication": "OAuth2 token (user-provided)",
+                },
+                "privacy": {
+                    "data_scope": "Authenticated user's own check-ins only",
+                    "data_flow": "Direct API calls to Foursquare; no data stored or cached by this server",
+                    "third_party_access": "None; data flows directly between Foursquare and the MCP client",
+                },
+                "tools": {
+                    "get_checkins": {"cost": "low", "api_calls": 1, "notes": "Single paginated request"},
+                    "get_checkins_by_date_range": {"cost": "low", "api_calls": 1, "notes": "Single request with date filters"},
+                    "get_recent_checkins": {"cost": "low", "api_calls": 1, "notes": "Single request with time filter"},
+                    "get_checkin_details": {"cost": "low", "api_calls": 1, "notes": "Single check-in lookup"},
+                    "get_all_checkins": {"cost": "high", "api_calls": "1 per 250 check-ins", "notes": "Paginated fetch of entire history"},
+                    "get_checkin_stats": {"cost": "low", "api_calls": 2, "notes": "Fetches newest and oldest check-ins"},
+                    "search_checkins": {"cost": "high", "api_calls": "1 per 250 scanned", "notes": "Client-side filtering; may scan many check-ins"},
+                    "get_server_info": {"cost": "none", "api_calls": 0, "notes": "Local introspection only"},
+                },
             }
 
         else:
             result = {"error": f"Unknown tool: {name}"}
 
+        import json
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
     except httpx.HTTPStatusError as e:
