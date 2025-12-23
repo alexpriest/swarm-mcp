@@ -10,10 +10,12 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that 
 | `get_checkins_by_date_range` | Get check-ins within a specific date range |
 | `get_recent_checkins` | Get check-ins from the past X days |
 | `get_checkin_details` | Get details about a specific check-in |
+| `get_venue_details` | Get venue info: ratings, hours, tips, photos |
 | `get_all_checkins` | Retrieve your entire check-in history |
 | `get_checkin_stats` | Get statistics (total count, date range, averages) |
 | `get_categories` | List all unique categories in your history with counts |
-| `search_checkins` | Search with filters: query, category, city, date range |
+| `get_top_venues` | Get your most visited venues with filters |
+| `search_checkins` | Search with filters: query, category, city, state, country, date range |
 | `get_server_info` | Get server metadata, data sources, and tool costs |
 
 All responses include a `_meta` block with transparency info (completeness, API calls made, data scope) to help AI models make informed decisions about expensive operations.
@@ -26,8 +28,10 @@ All responses include a `_meta` block with transparency info (completeness, API 
 | `get_checkins_by_date_range` | Low | Single request with date filters |
 | `get_recent_checkins` | Low | Single request with time filter |
 | `get_checkin_details` | Low | Single check-in lookup |
+| `get_venue_details` | Low | Single venue lookup |
 | `get_checkin_stats` | Low | 2 API calls (newest + oldest) |
 | `get_categories` | **High** | Scans history to discover unique categories |
+| `get_top_venues` | **High** | Scans history to aggregate venue visits |
 | `get_server_info` | None | Local introspection only |
 | `get_all_checkins` | **High** | 1 API call per 250 check-ins |
 | `search_checkins` | **High** | Client-side filtering; scans up to 5000 items |
@@ -124,10 +128,11 @@ Once configured, you can ask Claude things like:
 
 - "Show me my recent Swarm check-ins"
 - "How many times have I checked into coffee shops this year?"
-- "What's my most visited venue?"
-- "Show me all my check-ins in New York"
+- "What are my top 10 most visited coffee shops?"
+- "Show me all my check-ins in California"
 - "What are my check-in stats?"
-- "Search my check-ins for 'airport'"
+- "Get details about [venue name]" (ratings, hours, tips)
+- "What are the ratings for my favorite restaurants?"
 
 ## Example Output
 

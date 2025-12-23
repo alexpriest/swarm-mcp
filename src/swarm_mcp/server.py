@@ -218,6 +218,14 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Filter by city name (case-insensitive substring match)"
                     },
+                    "state": {
+                        "type": "string",
+                        "description": "Filter by state/region (case-insensitive substring match)"
+                    },
+                    "country": {
+                        "type": "string",
+                        "description": "Filter by country (case-insensitive substring match)"
+                    },
                     "start_date": {
                         "type": "string",
                         "description": "Start date in ISO format (YYYY-MM-DD). Only return check-ins on or after this date."
@@ -235,6 +243,55 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Maximum items to scan (default 5000). Increase for comprehensive searches, use -1 for unlimited.",
                         "default": 5000
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="get_venue_details",
+            description="Get detailed information about a venue by ID, including ratings, hours, tips, and photos. Venue IDs are included in check-in data.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "venue_id": {
+                        "type": "string",
+                        "description": "The Foursquare venue ID"
+                    }
+                },
+                "required": ["venue_id"]
+            }
+        ),
+        Tool(
+            name="get_top_venues",
+            description="Get your most visited venues with visit counts. EXPENSIVE: Scans check-in history to aggregate venue visits.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of top venues to return (default 10)",
+                        "default": 10
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Filter by category (e.g., 'Coffee Shop', 'Bar'). Case-insensitive."
+                    },
+                    "city": {
+                        "type": "string",
+                        "description": "Filter by city name (case-insensitive)"
+                    },
+                    "state": {
+                        "type": "string",
+                        "description": "Filter by state/region (case-insensitive)"
+                    },
+                    "country": {
+                        "type": "string",
+                        "description": "Filter by country (case-insensitive)"
+                    },
+                    "max_scan": {
+                        "type": "integer",
+                        "description": "Maximum check-ins to scan (default 10000, -1 for unlimited)",
+                        "default": 10000
                     }
                 }
             }
@@ -267,6 +324,7 @@ def format_checkin(checkin: dict) -> dict:
         "id": checkin.get("id"),
         "created_at": dt.isoformat(),
         "venue": {
+            "id": venue.get("id"),
             "name": venue.get("name", "Unknown"),
             "category": category,
             "address": location.get("formattedAddress", []),
@@ -579,13 +637,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             query = arguments.get("query", "").lower() if arguments.get("query") else None
             category_filter = arguments.get("category", "").lower() if arguments.get("category") else None
             city_filter = arguments.get("city", "").lower() if arguments.get("city") else None
+            state_filter = arguments.get("state", "").lower() if arguments.get("state") else None
+            country_filter = arguments.get("country", "").lower() if arguments.get("country") else None
             start_date_str = arguments.get("start_date")
             end_date_str = arguments.get("end_date")
             limit = arguments.get("limit", 50)
             max_scan = arguments.get("max_scan", 5000)
 
             # Validate that at least one filter is provided
-            if not any([query, category_filter, city_filter, start_date_str, end_date_str]):
+            if not any([query, category_filter, city_filter, state_filter, country_filter, start_date_str, end_date_str]):
                 result = {"error": "At least one filter (query, category, city, start_date, end_date) is required"}
             else:
                 # Parse dates if provided
@@ -638,6 +698,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         venue_name = venue.get("name", "").lower()
                         location = venue.get("location", {})
                         venue_city = location.get("city", "").lower() if location.get("city") else ""
+                        venue_state = location.get("state", "").lower() if location.get("state") else ""
+                        venue_country = location.get("country", "").lower() if location.get("country") else ""
                         categories = venue.get("categories", [])
                         category_names = [c.get("name", "").lower() for c in categories]
 
@@ -666,6 +728,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
                         # City filter: substring match
                         if city_filter and city_filter not in venue_city:
+                            matches = False
+
+                        # State filter: substring match
+                        if state_filter and state_filter not in venue_state:
+                            matches = False
+
+                        # Country filter: substring match
+                        if country_filter and country_filter not in venue_country:
                             matches = False
 
                         if matches:
@@ -701,6 +771,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     filters_applied["category"] = arguments.get("category")
                 if city_filter:
                     filters_applied["city"] = arguments.get("city")
+                if state_filter:
+                    filters_applied["state"] = arguments.get("state")
+                if country_filter:
+                    filters_applied["country"] = arguments.get("country")
                 if start_date_str:
                     filters_applied["start_date"] = start_date_str
                 if end_date_str:
@@ -731,6 +805,220 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     "checkins": matching_checkins
                 }
 
+        elif name == "get_venue_details":
+            venue_id = arguments["venue_id"]
+
+            data = await make_request(f"/venues/{venue_id}")
+            venue = data.get("response", {}).get("venue", {})
+
+            location = venue.get("location", {})
+            categories = venue.get("categories", [])
+            primary_category = categories[0].get("name") if categories else "Unknown"
+
+            # Format hours if available
+            hours_data = venue.get("hours", {})
+            hours = None
+            if hours_data:
+                hours = {
+                    "status": hours_data.get("status"),
+                    "is_open": hours_data.get("isOpen"),
+                    "timeframes": hours_data.get("timeframes", [])
+                }
+
+            # Format tips
+            tips = []
+            tips_data = venue.get("tips", {}).get("groups", [])
+            for group in tips_data:
+                for tip in group.get("items", [])[:5]:  # Limit to 5 tips
+                    tips.append({
+                        "text": tip.get("text"),
+                        "likes": tip.get("likes", {}).get("count", 0),
+                        "created_at": datetime.fromtimestamp(tip.get("createdAt", 0)).isoformat()
+                    })
+
+            # Format photos
+            photos = []
+            photos_data = venue.get("photos", {}).get("groups", [])
+            for group in photos_data:
+                for photo in group.get("items", [])[:5]:  # Limit to 5 photos
+                    photos.append({
+                        "url": f"{photo.get('prefix')}original{photo.get('suffix')}",
+                        "width": photo.get("width"),
+                        "height": photo.get("height")
+                    })
+
+            result = {
+                "_meta": build_meta(
+                    is_complete=True,
+                    returned_count=1,
+                ),
+                "venue": {
+                    "id": venue.get("id"),
+                    "name": venue.get("name"),
+                    "category": primary_category,
+                    "categories": [c.get("name") for c in categories],
+                    "verified": venue.get("verified", False),
+                    "location": {
+                        "address": location.get("address"),
+                        "city": location.get("city"),
+                        "state": location.get("state"),
+                        "country": location.get("country"),
+                        "postal_code": location.get("postalCode"),
+                        "formatted_address": location.get("formattedAddress", []),
+                        "lat": location.get("lat"),
+                        "lng": location.get("lng")
+                    },
+                    "contact": {
+                        "phone": venue.get("contact", {}).get("phone"),
+                        "formatted_phone": venue.get("contact", {}).get("formattedPhone"),
+                        "twitter": venue.get("contact", {}).get("twitter"),
+                        "instagram": venue.get("contact", {}).get("instagram"),
+                        "facebook": venue.get("contact", {}).get("facebook"),
+                    },
+                    "url": venue.get("url"),
+                    "rating": venue.get("rating"),
+                    "rating_color": venue.get("ratingColor"),
+                    "rating_signals": venue.get("ratingSignals"),
+                    "price": {
+                        "tier": venue.get("price", {}).get("tier"),
+                        "message": venue.get("price", {}).get("message"),
+                        "currency": venue.get("price", {}).get("currency"),
+                    } if venue.get("price") else None,
+                    "hours": hours,
+                    "popular_hours": venue.get("popular", {}).get("timeframes", []),
+                    "stats": {
+                        "total_checkins": venue.get("stats", {}).get("checkinsCount"),
+                        "total_users": venue.get("stats", {}).get("usersCount"),
+                        "total_tips": venue.get("stats", {}).get("tipCount"),
+                        "total_visits": venue.get("stats", {}).get("visitsCount"),
+                    },
+                    "tips": tips,
+                    "photos": photos,
+                    "description": venue.get("description"),
+                }
+            }
+
+        elif name == "get_top_venues":
+            limit = arguments.get("limit", 10)
+            category_filter = arguments.get("category", "").lower() if arguments.get("category") else None
+            city_filter = arguments.get("city", "").lower() if arguments.get("city") else None
+            state_filter = arguments.get("state", "").lower() if arguments.get("state") else None
+            country_filter = arguments.get("country", "").lower() if arguments.get("country") else None
+            max_scan = arguments.get("max_scan", 10000)
+
+            venue_visits: dict[str, dict] = {}
+            offset = 0
+            batch_size = 250
+            api_calls = 0
+            items_scanned = 0
+            total_available = None
+            hit_scan_limit = False
+
+            while True:
+                data = await make_request("/users/self/checkins", {
+                    "limit": batch_size,
+                    "offset": offset,
+                    "sort": "newestfirst"
+                })
+                api_calls += 1
+
+                checkins = data.get("response", {}).get("checkins", {})
+                if total_available is None:
+                    total_available = checkins.get("count", 0)
+                items = checkins.get("items", [])
+
+                if not items:
+                    break
+
+                for item in items:
+                    items_scanned += 1
+                    venue = item.get("venue", {})
+                    venue_id = venue.get("id")
+                    if not venue_id:
+                        continue
+
+                    location = venue.get("location", {})
+                    categories = venue.get("categories", [])
+                    category_names = [c.get("name", "").lower() for c in categories]
+
+                    # Extract parent categories
+                    all_category_terms = list(category_names)
+                    for cat in categories:
+                        icon = cat.get("icon", {})
+                        prefix = icon.get("prefix", "")
+                        if "/categories_v2/" in prefix:
+                            parts = prefix.split("/categories_v2/")[1].split("/")
+                            if len(parts) > 1:
+                                parent = parts[0].replace("_", " ").lower()
+                                all_category_terms.append(parent)
+
+                    # Apply filters
+                    if category_filter and not any(category_filter == cat or category_filter in cat for cat in all_category_terms):
+                        continue
+                    if city_filter and city_filter not in (location.get("city", "").lower()):
+                        continue
+                    if state_filter and state_filter not in (location.get("state", "").lower()):
+                        continue
+                    if country_filter and country_filter not in (location.get("country", "").lower()):
+                        continue
+
+                    # Aggregate
+                    if venue_id not in venue_visits:
+                        venue_visits[venue_id] = {
+                            "id": venue_id,
+                            "name": venue.get("name", "Unknown"),
+                            "category": categories[0].get("name") if categories else "Unknown",
+                            "city": location.get("city"),
+                            "state": location.get("state"),
+                            "country": location.get("country"),
+                            "visit_count": 0,
+                            "first_visit": None,
+                            "last_visit": None,
+                        }
+                    venue_visits[venue_id]["visit_count"] += 1
+                    visit_time = datetime.fromtimestamp(item.get("createdAt", 0)).isoformat()
+                    if venue_visits[venue_id]["last_visit"] is None:
+                        venue_visits[venue_id]["last_visit"] = visit_time
+                    venue_visits[venue_id]["first_visit"] = visit_time
+
+                offset += len(items)
+
+                if len(items) < batch_size:
+                    break
+
+                if max_scan > 0 and offset >= max_scan:
+                    hit_scan_limit = True
+                    break
+
+            # Sort by visit count and take top N
+            sorted_venues = sorted(venue_visits.values(), key=lambda x: x["visit_count"], reverse=True)[:limit]
+
+            # Build filters summary
+            filters_applied = {}
+            if category_filter:
+                filters_applied["category"] = arguments.get("category")
+            if city_filter:
+                filters_applied["city"] = arguments.get("city")
+            if state_filter:
+                filters_applied["state"] = arguments.get("state")
+            if country_filter:
+                filters_applied["country"] = arguments.get("country")
+
+            result = {
+                "_meta": build_meta(
+                    is_complete=not hit_scan_limit,
+                    returned_count=len(sorted_venues),
+                    total_available=total_available,
+                    limit_applied=limit,
+                    truncated_reason="scan_limit_reached" if hit_scan_limit else None,
+                    api_calls_made=api_calls,
+                    items_scanned=items_scanned,
+                ),
+                "filters": filters_applied if filters_applied else None,
+                "unique_venues_found": len(venue_visits),
+                "venues": sorted_venues
+            }
+
         elif name == "get_server_info":
             result = {
                 "_meta": build_meta(
@@ -740,7 +1028,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 ),
                 "server": {
                     "name": "swarm-mcp",
-                    "version": "0.1.0",
+                    "version": "0.5.0",
                     "description": "MCP server for Foursquare Swarm check-in data",
                 },
                 "data_source": {
@@ -758,10 +1046,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     "get_checkins_by_date_range": {"cost": "low", "api_calls": 1, "notes": "Single request with date filters"},
                     "get_recent_checkins": {"cost": "low", "api_calls": 1, "notes": "Single request with time filter"},
                     "get_checkin_details": {"cost": "low", "api_calls": 1, "notes": "Single check-in lookup"},
+                    "get_venue_details": {"cost": "low", "api_calls": 1, "notes": "Single venue lookup with ratings, hours, tips, photos"},
                     "get_all_checkins": {"cost": "high", "api_calls": "1 per 250 check-ins", "notes": "Paginated fetch of entire history"},
                     "get_checkin_stats": {"cost": "low", "api_calls": 2, "notes": "Fetches newest and oldest check-ins"},
                     "get_categories": {"cost": "high", "api_calls": "1 per 250 scanned", "notes": "Discovers all unique categories in history with counts"},
-                    "search_checkins": {"cost": "high", "api_calls": "1 per 250 scanned", "notes": "Filters: query, category (with parent matching), city, date range. Use max_scan=-1 for comprehensive."},
+                    "get_top_venues": {"cost": "high", "api_calls": "1 per 250 scanned", "notes": "Aggregates venues by visit count with category/location filters"},
+                    "search_checkins": {"cost": "high", "api_calls": "1 per 250 scanned", "notes": "Filters: query, category (with parent matching), city, state, country, date range. Use max_scan=-1 for comprehensive."},
                     "get_server_info": {"cost": "none", "api_calls": 0, "notes": "Local introspection only"},
                 },
             }
