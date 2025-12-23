@@ -187,6 +187,20 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="get_categories",
+            description="Get all unique venue categories from your check-in history with counts. Useful for discovering what categories exist before filtering. EXPENSIVE: Scans entire history.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "max_scan": {
+                        "type": "integer",
+                        "description": "Maximum items to scan (default 10000, use -1 for unlimited)",
+                        "default": 10000
+                    }
+                }
+            }
+        ),
+        Tool(
             name="search_checkins",
             description="Search check-ins with flexible filters. EXPENSIVE: Requires client-side filtering. Use filters to narrow results. For comprehensive searches, increase max_scan.",
             inputSchema={
@@ -198,7 +212,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "category": {
                         "type": "string",
-                        "description": "Exact category match (e.g., 'Coffee Shop', 'Airport', 'Bar'). Case-insensitive."
+                        "description": "Category match (e.g., 'Coffee Shop', 'Airport', 'Bar'). Case-insensitive. Matches both primary and parent categories (e.g., 'Coffee Shop' matches 'Café')."
                     },
                     "city": {
                         "type": "string",
@@ -485,6 +499,81 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 **stats
             }
 
+        elif name == "get_categories":
+            max_scan = arguments.get("max_scan", 10000)
+            category_counts = {}
+            offset = 0
+            batch_size = 250
+            api_calls = 0
+            items_scanned = 0
+            total_available = None
+
+            while True:
+                data = await make_request("/users/self/checkins", {
+                    "limit": batch_size,
+                    "offset": offset,
+                    "sort": "newestfirst"
+                })
+                api_calls += 1
+
+                checkins = data.get("response", {}).get("checkins", {})
+                if total_available is None:
+                    total_available = checkins.get("count", 0)
+                items = checkins.get("items", [])
+
+                if not items:
+                    break
+
+                for item in items:
+                    items_scanned += 1
+                    venue = item.get("venue", {})
+                    categories = venue.get("categories", [])
+                    for cat in categories:
+                        cat_name = cat.get("name", "Unknown")
+                        parent = cat.get("pluralName", cat_name)  # Some have parent info
+                        # Count both the category and track parent if different
+                        if cat_name not in category_counts:
+                            category_counts[cat_name] = {"count": 0, "parent": None}
+                        category_counts[cat_name]["count"] += 1
+                        # Check for parent category in icon prefix (Foursquare encodes hierarchy there)
+                        icon = cat.get("icon", {})
+                        prefix = icon.get("prefix", "")
+                        # Extract parent from icon path if available
+                        if "/categories_v2/" in prefix:
+                            parts = prefix.split("/categories_v2/")[1].split("/")
+                            if len(parts) > 1:
+                                category_counts[cat_name]["parent"] = parts[0].replace("_", " ").title()
+
+                offset += len(items)
+
+                if len(items) < batch_size:
+                    break
+
+                if max_scan > 0 and offset >= max_scan:
+                    break
+
+            # Sort by count descending
+            sorted_categories = sorted(
+                [(name, data["count"], data["parent"]) for name, data in category_counts.items()],
+                key=lambda x: x[1],
+                reverse=True
+            )
+
+            result = {
+                "_meta": build_meta(
+                    is_complete=(offset >= (total_available or 0)) or (max_scan < 0),
+                    returned_count=len(sorted_categories),
+                    total_available=total_available,
+                    api_calls_made=api_calls,
+                    items_scanned=items_scanned,
+                ),
+                "unique_categories": len(sorted_categories),
+                "categories": [
+                    {"name": name, "count": count, "parent": parent}
+                    for name, count, parent in sorted_categories
+                ]
+            }
+
         elif name == "search_checkins":
             # Extract filter parameters
             query = arguments.get("query", "").lower() if arguments.get("query") else None
@@ -552,15 +641,27 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         categories = venue.get("categories", [])
                         category_names = [c.get("name", "").lower() for c in categories]
 
+                        # Build list of all category matches including parents
+                        all_category_terms = list(category_names)
+                        for cat in categories:
+                            # Extract parent category from icon prefix if available
+                            icon = cat.get("icon", {})
+                            prefix = icon.get("prefix", "")
+                            if "/categories_v2/" in prefix:
+                                parts = prefix.split("/categories_v2/")[1].split("/")
+                                if len(parts) > 1:
+                                    parent = parts[0].replace("_", " ").lower()
+                                    all_category_terms.append(parent)
+
                         # Apply filters (all specified filters must match)
                         matches = True
 
                         # Text query: substring match on venue name or category
-                        if query and not (query in venue_name or any(query in cat for cat in category_names)):
+                        if query and not (query in venue_name or any(query in cat for cat in all_category_terms)):
                             matches = False
 
-                        # Category filter: exact match on any category
-                        if category_filter and not any(category_filter == cat for cat in category_names):
+                        # Category filter: match on category name OR parent category
+                        if category_filter and not any(category_filter == cat or category_filter in cat for cat in all_category_terms):
                             matches = False
 
                         # City filter: substring match
@@ -605,6 +706,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 if end_date_str:
                     filters_applied["end_date"] = end_date_str
 
+                # Calculate items remaining and suggestion
+                items_remaining = max(0, (total_available or 0) - items_scanned)
+                suggestion = None
+                if hit_scan_limit and items_remaining > 0:
+                    suggestion = f"Scanned {items_scanned:,} of {total_available:,} check-ins. Use max_scan=-1 for comprehensive results, or add date filters to narrow scope."
+                elif len(matching_checkins) >= limit and not exhausted_all:
+                    suggestion = f"Found {limit} matches and stopped. Increase 'limit' to see more, or add filters to narrow results."
+
                 result = {
                     "_meta": build_meta(
                         is_complete=is_complete and not hit_scan_limit,
@@ -617,6 +726,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     ),
                     "filters": filters_applied,
                     "count": len(matching_checkins),
+                    "items_remaining": items_remaining,
+                    "suggestion": suggestion,
                     "checkins": matching_checkins
                 }
 
@@ -649,7 +760,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     "get_checkin_details": {"cost": "low", "api_calls": 1, "notes": "Single check-in lookup"},
                     "get_all_checkins": {"cost": "high", "api_calls": "1 per 250 check-ins", "notes": "Paginated fetch of entire history"},
                     "get_checkin_stats": {"cost": "low", "api_calls": 2, "notes": "Fetches newest and oldest check-ins"},
-                    "search_checkins": {"cost": "high", "api_calls": "1 per 250 scanned", "notes": "Supports query, category, city, date range filters. Use max_scan=-1 for comprehensive searches."},
+                    "get_categories": {"cost": "high", "api_calls": "1 per 250 scanned", "notes": "Discovers all unique categories in history with counts"},
+                    "search_checkins": {"cost": "high", "api_calls": "1 per 250 scanned", "notes": "Filters: query, category (with parent matching), city, date range. Use max_scan=-1 for comprehensive."},
                     "get_server_info": {"cost": "none", "api_calls": 0, "notes": "Local introspection only"},
                 },
             }

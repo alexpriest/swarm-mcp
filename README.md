@@ -12,6 +12,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that 
 | `get_checkin_details` | Get details about a specific check-in |
 | `get_all_checkins` | Retrieve your entire check-in history |
 | `get_checkin_stats` | Get statistics (total count, date range, averages) |
+| `get_categories` | List all unique categories in your history with counts |
 | `search_checkins` | Search with filters: query, category, city, date range |
 | `get_server_info` | Get server metadata, data sources, and tool costs |
 
@@ -26,6 +27,7 @@ All responses include a `_meta` block with transparency info (completeness, API 
 | `get_recent_checkins` | Low | Single request with time filter |
 | `get_checkin_details` | Low | Single check-in lookup |
 | `get_checkin_stats` | Low | 2 API calls (newest + oldest) |
+| `get_categories` | **High** | Scans history to discover unique categories |
 | `get_server_info` | None | Local introspection only |
 | `get_all_checkins` | **High** | 1 API call per 250 check-ins |
 | `search_checkins` | **High** | Client-side filtering; scans up to 5000 items |
