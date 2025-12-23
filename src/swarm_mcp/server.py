@@ -188,21 +188,41 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="search_checkins",
-            description="Search check-ins by venue name or category. EXPENSIVE: Requires client-side filtering (Foursquare API doesn't support venue search). Scans check-ins sequentially until limit matches found or 5000 items scanned. Use get_checkin_stats first to understand data volume.",
+            description="Search check-ins with flexible filters. EXPENSIVE: Requires client-side filtering. Use filters to narrow results. For comprehensive searches, increase max_scan.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search term to match against venue names or categories (case-insensitive substring match)"
+                        "description": "Text to match against venue names or categories (case-insensitive substring). Optional if using other filters."
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Exact category match (e.g., 'Coffee Shop', 'Airport', 'Bar'). Case-insensitive."
+                    },
+                    "city": {
+                        "type": "string",
+                        "description": "Filter by city name (case-insensitive substring match)"
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date in ISO format (YYYY-MM-DD). Only return check-ins on or after this date."
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "End date in ISO format (YYYY-MM-DD). Only return check-ins on or before this date."
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum results to return",
+                        "description": "Maximum results to return (default 50)",
                         "default": 50
+                    },
+                    "max_scan": {
+                        "type": "integer",
+                        "description": "Maximum items to scan (default 5000). Increase for comprehensive searches, use -1 for unlimited.",
+                        "default": 5000
                     }
-                },
-                "required": ["query"]
+                }
             }
         ),
         Tool(
@@ -466,82 +486,139 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             }
 
         elif name == "search_checkins":
-            query = arguments["query"].lower()
+            # Extract filter parameters
+            query = arguments.get("query", "").lower() if arguments.get("query") else None
+            category_filter = arguments.get("category", "").lower() if arguments.get("category") else None
+            city_filter = arguments.get("city", "").lower() if arguments.get("city") else None
+            start_date_str = arguments.get("start_date")
+            end_date_str = arguments.get("end_date")
             limit = arguments.get("limit", 50)
+            max_scan = arguments.get("max_scan", 5000)
 
-            # We need to fetch check-ins and filter locally
-            # The API doesn't support venue name search on check-ins
-            matching_checkins = []
-            offset = 0
-            batch_size = 250
-            api_calls = 0
-            items_scanned = 0
-            total_available = None
-            hit_safety_limit = False
-            exhausted_all = False
+            # Validate that at least one filter is provided
+            if not any([query, category_filter, city_filter, start_date_str, end_date_str]):
+                result = {"error": "At least one filter (query, category, city, start_date, end_date) is required"}
+            else:
+                # Parse dates if provided
+                after_timestamp = None
+                before_timestamp = None
+                if start_date_str:
+                    start_date = datetime.fromisoformat(start_date_str)
+                    after_timestamp = int(start_date.timestamp())
+                if end_date_str:
+                    end_date = datetime.fromisoformat(end_date_str)
+                    before_timestamp = int((end_date + timedelta(days=1)).timestamp())
 
-            while len(matching_checkins) < limit:
-                data = await make_request("/users/self/checkins", {
-                    "limit": batch_size,
-                    "offset": offset,
-                    "sort": "newestfirst"
-                })
-                api_calls += 1
+                # We need to fetch check-ins and filter locally
+                matching_checkins = []
+                offset = 0
+                batch_size = 250
+                api_calls = 0
+                items_scanned = 0
+                total_available = None
+                hit_scan_limit = False
+                exhausted_all = False
 
-                checkins = data.get("response", {}).get("checkins", {})
-                if total_available is None:
-                    total_available = checkins.get("count", 0)
-                items = checkins.get("items", [])
+                while len(matching_checkins) < limit:
+                    request_params = {
+                        "limit": batch_size,
+                        "offset": offset,
+                        "sort": "newestfirst"
+                    }
+                    # Use API-level date filtering when possible (more efficient)
+                    if after_timestamp:
+                        request_params["afterTimestamp"] = after_timestamp
+                    if before_timestamp:
+                        request_params["beforeTimestamp"] = before_timestamp
 
-                if not items:
-                    exhausted_all = True
-                    break
+                    data = await make_request("/users/self/checkins", request_params)
+                    api_calls += 1
 
-                for item in items:
-                    items_scanned += 1
-                    venue = item.get("venue", {})
-                    venue_name = venue.get("name", "").lower()
-                    categories = venue.get("categories", [])
-                    category_names = [c.get("name", "").lower() for c in categories]
+                    checkins = data.get("response", {}).get("checkins", {})
+                    if total_available is None:
+                        total_available = checkins.get("count", 0)
+                    items = checkins.get("items", [])
 
-                    if query in venue_name or any(query in cat for cat in category_names):
-                        matching_checkins.append(format_checkin(item))
-                        if len(matching_checkins) >= limit:
-                            break
+                    if not items:
+                        exhausted_all = True
+                        break
 
-                offset += len(items)
+                    for item in items:
+                        items_scanned += 1
+                        venue = item.get("venue", {})
+                        venue_name = venue.get("name", "").lower()
+                        location = venue.get("location", {})
+                        venue_city = location.get("city", "").lower() if location.get("city") else ""
+                        categories = venue.get("categories", [])
+                        category_names = [c.get("name", "").lower() for c in categories]
 
-                if len(items) < batch_size:
-                    exhausted_all = True
-                    break
+                        # Apply filters (all specified filters must match)
+                        matches = True
 
-                # Safety limit to avoid runaway searches
-                if offset > 5000:
-                    hit_safety_limit = True
-                    break
+                        # Text query: substring match on venue name or category
+                        if query and not (query in venue_name or any(query in cat for cat in category_names)):
+                            matches = False
 
-            # Determine completeness: complete if we exhausted all checkins OR found limit matches
-            is_complete = exhausted_all or len(matching_checkins) >= limit
-            truncated_reason = None
-            if hit_safety_limit:
-                truncated_reason = "safety_limit_5000_items"
-            elif len(matching_checkins) >= limit and not exhausted_all:
-                truncated_reason = "result_limit_reached"
+                        # Category filter: exact match on any category
+                        if category_filter and not any(category_filter == cat for cat in category_names):
+                            matches = False
 
-            result = {
-                "_meta": build_meta(
-                    is_complete=is_complete and not hit_safety_limit,
-                    returned_count=len(matching_checkins),
-                    total_available=total_available,
-                    limit_applied=limit,
-                    truncated_reason=truncated_reason,
-                    api_calls_made=api_calls,
-                    items_scanned=items_scanned,
-                ),
-                "query": arguments["query"],
-                "count": len(matching_checkins),
-                "checkins": matching_checkins
-            }
+                        # City filter: substring match
+                        if city_filter and city_filter not in venue_city:
+                            matches = False
+
+                        if matches:
+                            matching_checkins.append(format_checkin(item))
+                            if len(matching_checkins) >= limit:
+                                break
+
+                    offset += len(items)
+
+                    if len(items) < batch_size:
+                        exhausted_all = True
+                        break
+
+                    # Safety limit to avoid runaway searches (unless unlimited)
+                    if max_scan > 0 and offset >= max_scan:
+                        hit_scan_limit = True
+                        break
+
+                # Determine completeness
+                is_complete = exhausted_all or len(matching_checkins) >= limit
+                truncated_reason = None
+                if hit_scan_limit:
+                    pct = round(items_scanned / total_available * 100) if total_available else 0
+                    truncated_reason = f"scan_limit_reached ({items_scanned:,} of {total_available:,} scanned, {pct}%)"
+                elif len(matching_checkins) >= limit and not exhausted_all:
+                    truncated_reason = "result_limit_reached"
+
+                # Build filters summary for response
+                filters_applied = {}
+                if query:
+                    filters_applied["query"] = arguments.get("query")
+                if category_filter:
+                    filters_applied["category"] = arguments.get("category")
+                if city_filter:
+                    filters_applied["city"] = arguments.get("city")
+                if start_date_str:
+                    filters_applied["start_date"] = start_date_str
+                if end_date_str:
+                    filters_applied["end_date"] = end_date_str
+
+                result = {
+                    "_meta": build_meta(
+                        is_complete=is_complete and not hit_scan_limit,
+                        returned_count=len(matching_checkins),
+                        total_available=total_available,
+                        limit_applied=limit,
+                        truncated_reason=truncated_reason,
+                        api_calls_made=api_calls,
+                        items_scanned=items_scanned,
+                    ),
+                    "filters": filters_applied,
+                    "count": len(matching_checkins),
+                    "checkins": matching_checkins
+                }
 
         elif name == "get_server_info":
             result = {
@@ -572,7 +649,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     "get_checkin_details": {"cost": "low", "api_calls": 1, "notes": "Single check-in lookup"},
                     "get_all_checkins": {"cost": "high", "api_calls": "1 per 250 check-ins", "notes": "Paginated fetch of entire history"},
                     "get_checkin_stats": {"cost": "low", "api_calls": 2, "notes": "Fetches newest and oldest check-ins"},
-                    "search_checkins": {"cost": "high", "api_calls": "1 per 250 scanned", "notes": "Client-side filtering; may scan many check-ins"},
+                    "search_checkins": {"cost": "high", "api_calls": "1 per 250 scanned", "notes": "Supports query, category, city, date range filters. Use max_scan=-1 for comprehensive searches."},
                     "get_server_info": {"cost": "none", "api_calls": 0, "notes": "Local introspection only"},
                 },
             }
