@@ -1,6 +1,14 @@
-# Swarm MCP Server
+# swarm-mcp
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that provides access to your [Foursquare Swarm](https://www.swarmapp.com/) check-in data. Use it with Claude Desktop, Claude Code, or any MCP-compatible client to analyze your check-in history.
+An MCP server over a Foursquare Swarm check-in history, back to the first check-in.
+
+## Status
+
+Shipped — the oldest project on the list, first committed December 2025.
+
+## License
+
+MIT
 
 ## Features
 
