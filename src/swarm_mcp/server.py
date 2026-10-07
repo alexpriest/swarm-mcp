@@ -1028,7 +1028,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 ),
                 "server": {
                     "name": "swarm-mcp",
-                    "version": "0.5.0",
+                    "version": "0.5.1",
                     "description": "MCP server for Foursquare Swarm check-in data",
                 },
                 "data_source": {
