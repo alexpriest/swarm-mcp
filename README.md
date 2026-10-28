@@ -20,7 +20,7 @@ MIT
 | 2025-12-22 | [0.4.0](https://pypi.org/project/swarm-mcp/0.4.0/) | `get_categories` with parent-category matching |
 | 2025-12-23 | [0.5.0](https://pypi.org/project/swarm-mcp/0.5.0/) | Venue details, top venues, state and country filters |
 | 2026-10-07 | [0.5.1](https://pypi.org/project/swarm-mcp/0.5.1/) | Pinned `mcp<2` after MCP Python SDK 2.0 removed the server API it used |
-| 2026-10-27 | 0.6.0 | Ported to MCP Python SDK 2.x; tool errors now set `isError` |
+| 2026-10-27 | [0.6.0](https://pypi.org/project/swarm-mcp/0.6.0/) | Ported to MCP Python SDK 2.x; tool errors now set `isError` |
 
 The [commit history](https://github.com/alexpriest/swarm-mcp/commits/main) and [PyPI release history](https://pypi.org/project/swarm-mcp/#history) are the public record.
 
