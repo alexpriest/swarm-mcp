@@ -14,13 +14,21 @@ from typing import Any
 import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.server import ServerRequestContext
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    TextContent,
+    Tool,
+)
+
+from swarm_mcp import __version__
 
 # Foursquare API configuration
 API_BASE = "https://api.foursquare.com/v2"
 API_VERSION = "20231010"  # Foursquare requires a version date
-
-server = Server("swarm-mcp")
 
 
 def build_meta(
@@ -79,8 +87,7 @@ async def make_request(endpoint: str, params: dict = None) -> dict:
         return response.json()
 
 
-@server.list_tools()
-async def list_tools() -> list[Tool]:
+def list_tools() -> list[Tool]:
     """List available tools."""
     return [
         Tool(
@@ -341,8 +348,7 @@ def format_checkin(checkin: dict) -> dict:
     }
 
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+async def call_tool(name: str, arguments: dict) -> CallToolResult:
     """Handle tool calls."""
 
     try:
@@ -1028,7 +1034,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 ),
                 "server": {
                     "name": "swarm-mcp",
-                    "version": "0.5.1",
+                    "version": __version__,
                     "description": "MCP server for Foursquare Swarm check-in data",
                 },
                 "data_source": {
@@ -1060,7 +1066,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = {"error": f"Unknown tool: {name}"}
 
         import json
-        return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+        return CallToolResult(
+            content=[TextContent(type="text", text=json.dumps(result, indent=2, default=str))],
+            is_error="error" in result,
+        )
 
     except httpx.HTTPStatusError as e:
         error_msg = f"API error: {e.response.status_code}"
@@ -1069,9 +1078,27 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             error_msg += f" - {error_detail}"
         except:
             pass
-        return [TextContent(type="text", text=error_msg)]
+        return CallToolResult(content=[TextContent(type="text", text=error_msg)], is_error=True)
     except Exception as e:
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        return CallToolResult(content=[TextContent(type="text", text=f"Error: {str(e)}")], is_error=True)
+
+
+async def handle_list_tools(
+    ctx: ServerRequestContext, params: PaginatedRequestParams | None
+) -> ListToolsResult:
+    return ListToolsResult(tools=list_tools())
+
+
+async def handle_call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult:
+    return await call_tool(params.name, params.arguments or {})
+
+
+server = Server(
+    "swarm-mcp",
+    version=__version__,
+    on_list_tools=handle_list_tools,
+    on_call_tool=handle_call_tool,
+)
 
 
 async def run_server():

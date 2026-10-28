@@ -4,11 +4,25 @@ An MCP server over a Foursquare Swarm check-in history, back to the first check-
 
 ## Status
 
-Shipped — the oldest project on the list, first committed December 2025.
+Shipped and maintained. First released December 18, 2025, ten months before Foursquare shipped its own Swarm MCP in October 2026. Re-verified against the live Foursquare API on October 27, 2026: all 11 tools pass.
 
 ## License
 
 MIT
+
+## History
+
+| Date | Release | What changed |
+|------|---------|--------------|
+| 2025-12-18 | [0.1.0](https://pypi.org/project/swarm-mcp/0.1.0/) | First public release on GitHub and PyPI: check-in history, date ranges, recent check-ins, stats, search |
+| 2025-12-22 | [0.2.0](https://pypi.org/project/swarm-mcp/0.2.0/) | `_meta` transparency block and per-tool cost signals |
+| 2025-12-22 | [0.3.0](https://pypi.org/project/swarm-mcp/0.3.0/) | Category, city, and date filters on search |
+| 2025-12-22 | [0.4.0](https://pypi.org/project/swarm-mcp/0.4.0/) | `get_categories` with parent-category matching |
+| 2025-12-23 | [0.5.0](https://pypi.org/project/swarm-mcp/0.5.0/) | Venue details, top venues, state and country filters |
+| 2026-10-07 | [0.5.1](https://pypi.org/project/swarm-mcp/0.5.1/) | Pinned `mcp<2` after MCP Python SDK 2.0 removed the server API it used |
+| 2026-10-27 | 0.6.0 | Ported to MCP Python SDK 2.x; tool errors now set `isError` |
+
+The [commit history](https://github.com/alexpriest/swarm-mcp/commits/main) and [PyPI release history](https://pypi.org/project/swarm-mcp/#history) are the public record.
 
 ## Features
 

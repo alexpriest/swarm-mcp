@@ -1,6 +1,6 @@
 [project]
 name = "swarm-mcp"
-version = "0.5.1"
+version = "0.6.0"
 description = "MCP server for Foursquare Swarm check-in data"
 readme = "README.md"
 license = "MIT"
@@ -17,9 +17,10 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "mcp>=1.0.0,<2",
+    "mcp>=2.0.0,<3",
     "httpx>=0.27.0",
 ]
 
